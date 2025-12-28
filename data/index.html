@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Pentest Suite</title>
+    <style>
+        :root { --bg: #121212; --panel: #1e1e1e; --primary: #00e676; --text: #e0e0e0; --danger: #ff5252; --highlight: #2c2c2c; }
+        body { margin: 0; font-family: 'Segoe UI', monospace; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar */
+        .sidebar { width: 220px; background: #000; display: flex; flex-direction: column; padding: 20px; }
+        .brand { font-size: 1.1rem; font-weight: bold; color: var(--primary); margin-bottom: 30px; letter-spacing: 1px; text-transform: uppercase; }
+        .nav-btn { background: none; border: none; color: #888; text-align: left; padding: 12px; cursor: pointer; font-size: 0.95rem; transition: 0.2s; border-radius: 4px; margin-bottom: 4px; }
+        .nav-btn:hover, .nav-btn.active { background: var(--panel); color: #fff; border-left: 3px solid var(--primary); padding-left: 9px; }
+
+        /* Content */
+        .content { flex: 1; padding: 30px; overflow-y: auto; }
+        .panel { display: none; max-width: 900px; margin: 0 auto; }
+        .panel.active { display: block; animation: fade 0.2s; }
+        
+        .card { background: var(--panel); padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; }
+        h2 { margin: 0 0 15px 0; font-size: 1.2rem; color: var(--primary); border-bottom: 1px solid #333; padding-bottom: 10px; }
+        
+        /* Inputs & Buttons */
+        label { display: block; margin: 10px 0 5px; font-size: 0.85rem; color: #aaa; font-weight: bold; }
+        input, select, textarea { width: 100%; padding: 10px; background: #252525; border: 1px solid #444; color: white; border-radius: 4px; box-sizing: border-box; font-family: monospace; }
+        textarea { height: 150px; resize: vertical; }
+        
+        .pass-group { position: relative; }
+        .toggle-pass { position: absolute; right: 10px; top: 10px; cursor: pointer; color: #888; }
+        
+        .btn { padding: 10px 20px; background: var(--primary); color: #000; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; text-transform: uppercase; font-size: 0.85rem; }
+        .btn:hover { opacity: 0.9; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-sm { padding: 5px 10px; font-size: 0.75rem; margin-right: 5px; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #333; font-size: 0.9rem; }
+        tr:hover { background: #252525; }
+
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 100; align-items: center; justify-content: center; }
+        .modal-content { background: var(--panel); padding: 20px; width: 80%; max-width: 800px; border-radius: 8px; border: 1px solid var(--primary); }
+        .modal-header { display: flex; justify-content: space-between; margin-bottom: 15px; }
+        .close { cursor: pointer; color: var(--danger); font-size: 1.5rem; }
+
+        @keyframes fade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        
+        @media (max-width: 600px) {
+            body { flex-direction: column; }
+            .sidebar { width: 100%; padding: 10px; flex-direction: row; overflow-x: auto; }
+            .brand { display: none; }
+            .nav-btn { white-space: nowrap; }
+            .modal-content { width: 95%; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar">
+        <div class="brand">ESP32 Pentest</div>
+        <button class="nav-btn active" onclick="go('settings')">⚙️ Settings</button>
+        <button class="nav-btn" onclick="go('files')">📁 Files</button>
+        <button class="nav-btn" onclick="go('live')">⌨️ Live Write</button>
+        <button class="nav-btn" onclick="go('hid')">📜 Ducky</button>
+        <button class="nav-btn" onclick="go('scanner')">📡 Scanner</button>
+        <button class="nav-btn" onclick="go('history')">📜 History</button>
+    </div>
+
+    <div class="content">
+        
+        <div id="settings" class="panel active">
+            <div class="card">
+                <h2>Access Point (AP) Settings</h2>
+                <label>AP SSID (Hotspot Name)</label><input type="text" id="apSSID">
+                <label>AP Password</label>
+                <div class="pass-group">
+                    <input type="password" id="apPass">
+                    <span class="toggle-pass" onclick="toggleVis('apPass')">👁️</span>
+                </div>
+
+                <h2 style="margin-top:20px">Station (Client) Settings</h2>
+                <p style="color:#888; font-size:0.8rem">Connect ESP32 to a Router (Optional)</p>
+                <label>Router SSID</label><input type="text" id="staSSID">
+                <label>Router Password</label>
+                <div class="pass-group">
+                    <input type="password" id="staPass">
+                    <span class="toggle-pass" onclick="toggleVis('staPass')">👁️</span>
+                </div>
+                <div id="staIP" style="margin-top:5px; color:var(--primary); font-size:0.85rem"></div>
+
+                <h2 style="margin-top:20px">Spoofer Settings</h2>
+                <label>Bluetooth Name</label><input type="text" id="devName">
+                <label>Device Type</label>
+                <select id="devType">
+                    <option value="961">Keyboard</option>
+                    <option value="962">Mouse</option>
+                    <option value="964">Gamepad</option>
+                </select>
+                <label>Spoof MAC (XX:XX:XX:XX:XX:XX)</label><input type="text" id="devMac">
+                
+                <h2 style="margin-top:20px">Global Settings</h2>
+                <label>Default Ducky Delay (ms)</label><input type="number" id="defDelay" value="5">
+
+                <h2 style="margin-top:20px">Timing Settings (Advanced)</h2>
+                <div style="display:flex; gap:10px;">
+                    <div style="flex:1">
+                        <label>Delay Between Keys (ms)</label>
+                        <input type="number" id="defDelay" value="15">
+                    </div>
+                    <div style="flex:1">
+                        <label>Key Hold Time (ms)</label>
+                        <input type="number" id="keyHold" value="15">
+                    </div>
+                </div>
+                <p style="color:#aaa; font-size:0.75rem; margin-top:5px;">Increase Hold Time if characters are missing (Try 20-30ms for Windows).</p>
+                
+                <button class="btn" style="margin-top:20px; width:100%" onclick="saveCfg()">💾 Save All & Reboot</button>
+            </div>
+        </div>
+
+        <div id="files" class="panel">
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h2>File Storage</h2>
+                    <button class="btn btn-sm" onclick="openEditor('payload.txt', '')">+ New</button>
+                </div>
+                <table id="fileTable"><thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead><tbody id="fileList"></tbody></table>
+            </div>
+        </div>
+
+    <div id="live" class="panel">
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h2>Live Writer</h2>
+            <div id="liveStatus" style="font-size:0.8rem; font-weight:bold; color:#555;">IDLE</div>
+        </div>
+
+        <textarea id="liveText" placeholder="Type text to send block..."></textarea>
+        
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; margin-top:10px;">
+            <button class="btn btn-sm" style="background:#333;" onclick="sendKey('ctrl_a')">Sel All</button>
+            <button class="btn btn-sm" style="background:#333;" onclick="sendKey('ctrl_c')">Copy</button>
+            <button class="btn btn-sm" style="background:#333;" onclick="sendKey('ctrl_v')">Paste</button>
+            <button class="btn btn-sm" style="background:#333;" onclick="sendKey('ctrl_z')">Undo</button>
+            
+            <button class="btn btn-sm" style="background:#444;" onclick="sendKey('enter')">ENTER</button>
+            <button class="btn btn-sm" style="background:#444;" onclick="sendKey('backspace')">BKSP</button>
+            <button class="btn btn-sm" style="background:#444;" onclick="sendKey('esc')">ESC</button>
+            <button class="btn btn-sm" style="background:#444;" onclick="sendKey('tab')">TAB</button>
+
+            <button class="btn btn-sm" style="background:#555;" onclick="sendKey('win_r')">Win+R</button>
+            <button class="btn btn-sm" style="background:#555;" onclick="sendKey('win_d')">Win+D</button>
+        </div>
+
+        <div style="margin-top:15px; display:flex; gap:10px;">
+            <button class="btn" style="flex:1" onclick="sendLive()">▶ Send Block</button>
+            <button class="btn btn-danger" onclick="stopDucky()">🛑 Stop</button>
+        </div>
+    </div>
+    </div>
+
+        <div id="hid" class="panel">
+            <div class="card">
+                <h2>Ducky Script</h2>
+                <textarea id="duckyScript" placeholder="STRING Hello&#10;ENTER"></textarea>
+                <div style="margin-top:10px;"><button class="btn" onclick="runScript()">▶ Run</button> <button class="btn btn-danger" onclick="stopDucky()">Stop</button></div>
+            </div>
+        </div>
+
+        <div id="scanner" class="panel">
+            <div class="card">
+                <h2>Scanner</h2>
+                <button class="btn" id="scanBtn" onclick="runScan()">Scan</button>
+                <table id="scanTable"><thead><tr><th>Name</th><th>MAC</th><th>RSSI</th></tr></thead><tbody id="scanResults"></tbody></table>
+            </div>
+        </div>
+
+        <div id="history" class="panel">
+            <div class="card">
+                <h2>Logs</h2>
+                <pre id="historyBox" style="background:#000; padding:10px; height:200px; overflow:auto;"></pre>
+                <button class="btn btn-sm" onclick="loadHist()">Refresh</button> <button class="btn btn-sm btn-danger" onclick="clearHist()">Clear</button>
+            </div>
+        </div>
+
+    </div>
+
+    <div id="editorModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header"><input type="text" id="editFilename" style="width:70%"><span class="close" onclick="closeEditor()">&times;</span></div>
+            <textarea id="editContent" style="height:300px; margin-bottom:15px"></textarea>
+            <button class="btn" onclick="saveFile()">Save</button>
+        </div>
+    </div>
+
+    <script>
+        const $ = id => document.getElementById(id);
+        function go(id) {
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            $(id).classList.add('active'); event.target.classList.add('active');
+            if(id === 'files') loadFiles();
+        }
+        function toggleVis(id) { const x=$(id); x.type = x.type==='password'?'text':'password'; }
+
+        // Config Load/Save
+        fetch('/api/config').then(r=>r.json()).then(d=>{ 
+            $('devName').value=d.name; $('devType').value=d.type; $('devMac').value=d.mac;
+            $('apSSID').value=d.ap_ssid; $('apPass').value=d.ap_pass;
+            $('staSSID').value=d.sta_ssid; $('staPass').value=d.sta_pass;
+            $('defDelay').value=d.def_delay;
+            $('keyHold').value=d.key_hold;
+            if(d.ip && d.ip !== "0.0.0.0") $('staIP').innerText = "Connected IP: " + d.ip;
+        });
+
+        function saveCfg() {
+            const d = new FormData(); 
+            d.append("name", $('devName').value); d.append("type", $('devType').value); d.append("mac", $('devMac').value);
+            d.append("ap_ssid", $('apSSID').value); d.append("ap_pass", $('apPass').value);
+            d.append("sta_ssid", $('staSSID').value); d.append("sta_pass", $('staPass').value);
+            d.append("def_delay", $('defDelay').value);
+            d.append("key_hold", $('keyHold').value);
+            
+            if(!confirm("Reboot to apply settings?")) return;
+            fetch('/api/save', {method:'POST', body:d}).then(()=>alert("Rebooting..."));
+        }
+
+        // --- Files, Live, Ducky, Scanner, History (Standard Logic) ---
+        function loadFiles() {
+            fetch('/api/files/list').then(r=>r.json()).then(files => {
+                const list = $('fileList'); list.innerHTML = '';
+                files.forEach(f => list.innerHTML += `<tr><td>${f.name}</td><td>${f.size} B</td><td><button class="btn btn-sm" onclick="loadFile('${f.name}')">Edit</button><button class="btn btn-sm" onclick="loadToDucky('${f.name}')">Load</button><button class="btn btn-sm btn-danger" onclick="delFile('${f.name}')">X</button></td></tr>`);
+            });
+        }
+        function openEditor(n, c) { $('editFilename').value=n; $('editContent').value=c; $('editorModal').style.display='flex'; }
+        function closeEditor() { $('editorModal').style.display='none'; }
+        function loadFile(n) { fetch(`/api/files/read?path=${n}`).then(r=>r.text()).then(t => openEditor(n, t)); }
+        function saveFile() { const d = new FormData(); d.append("path", $('editFilename').value); d.append("content", $('editContent').value); fetch('/api/files/write', {method:'POST', body:d}).then(()=>{ closeEditor(); loadFiles(); }); }
+        function delFile(n) { if(confirm('Del '+n+'?')) { const d=new FormData(); d.append("path", n); fetch('/api/files/delete', {method:'POST', body:d}).then(loadFiles); } }
+        function loadToDucky(n) { fetch(`/api/files/read?path=${n}`).then(r=>r.text()).then(t => { $('duckyScript').value=t; go('hid'); }); }
+        let pollingInterval = null;
+
+        function sendKey(cmd) {
+            const d = new FormData(); d.append("cmd", cmd);
+            fetch('/api/live/key', {method:'POST', body:d});
+        }
+
+        function sendLive() {
+        const d = new FormData(); d.append("text", $('liveText').value);
+        fetch('/api/live/type', {method:'POST', body:d}).then(() => {
+            $('liveStatus').innerText = "TYPING...";
+            $('liveStatus').style.color = "#00e676"; // Green
+            startPolling();
+        });
+        }
+
+        function startPolling() {
+        if(pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = setInterval(() => {
+            fetch('/api/status').then(r=>r.json()).then(d => {
+                if(d.busy) {
+                    $('liveStatus').innerText = "TYPING...";
+                    $('liveStatus').style.color = "#00e676";
+                } else {
+                    $('liveStatus').innerText = "COMPLETE";
+                    $('liveStatus').style.color = "#fff";
+                    clearInterval(pollingInterval);
+                    alert("Task Complete!"); // Notification
+                }
+            });
+        }, 1000);
+        }
+
+        function runScript() { const d=new FormData(); d.append("script", $('duckyScript').value); fetch('/api/ducky/run', {method:'POST', body:d}); }
+        function stopDucky() { 
+        fetch('/api/ducky/stop', {method:'POST'}).then(() => {
+            $('liveStatus').innerText = "STOPPED";
+            $('liveStatus').style.color = "red";
+            if(pollingInterval) clearInterval(pollingInterval);
+        });
+        }
+        function runScan() { $('scanBtn').innerText="..."; $('scanBtn').disabled=true; fetch('/api/scan/start', {method:'POST'}).then(()=>setTimeout(getScan, 6000)); }
+        function getScan() { fetch('/api/scan/results').then(r=>r.json()).then(d=>{ $('scanResults').innerHTML=''; d.forEach(x => $('scanResults').innerHTML+=`<tr><td>${x.name||'?'}</td><td>${x.mac}</td><td>${x.rssi}</td></tr>`); $('scanBtn').innerText="Scan"; $('scanBtn').disabled=false; }); }
+        function loadHist() { fetch('/api/history').then(r=>r.text()).then(t => $('historyBox').innerText = t); }
+        function clearHist() { fetch('/api/clear_history', {method:'POST'}).then(loadHist); }
+        loadHist();
+    </script>
+</body>
+</html>
