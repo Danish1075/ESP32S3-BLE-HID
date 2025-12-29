@@ -40,7 +40,7 @@ bool liveTypeRunning = false;
 String liveTypeBuffer = "";
 int liveTypeIndex = 0;
 
-// --- KEYMAP (Standard US) ---
+// --- KEYMAP & HID LOGIC (Standard US) ---
 const uint8_t keymap[128][2] = {
     {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, 
     {0,0x2A},{0,0x2B},{0,0x28},{0,0},{0,0},{0,0},{0,0},{0,0}, 
@@ -55,7 +55,6 @@ const uint8_t keymap[128][2] = {
     {0,0x04},{0,0x05},{0,0x06},{0,0x07},{0,0x08},{0,0x09},{0,0x0A},{0,0x0B},{0,0x0C},{0,0x0D},{0,0x0E},{0,0x0F},{0,0x10},{0,0x11},{0,0x12},{0,0x13},{0,0x14},{0,0x15},{0,0x16},{0,0x17},{0,0x18},{0,0x19},{0,0x1A},{0,0x1B},{0,0x1C},{0,0x1D},
     {2,0x2F},{2,0x31},{2,0x30},{2,0x35},{0,0x4C}
 };
-
 #define KEY_ENTER 0x28
 #define KEY_ESC 0x29
 #define KEY_BACKSPACE 0x2A
@@ -116,11 +115,27 @@ void processDuckyLine(String line) {
     else if (cmd == "BACKSPACE" || cmd == "BKSP") sendKeyRaw(KEY_BACKSPACE, 0);
 }
 
+// --- History Saver (Safe Version) ---
+void saveHistory(String macAddress) {
+    // Note: No LittleFS.begin() here, it's done in setup()
+    File file = LittleFS.open("/history.txt", FILE_APPEND);
+    if(file) {
+        file.printf("%s | %lu s\n", macAddress.c_str(), millis()/1000);
+        file.close();
+    } else {
+        Serial.println("Failed to open history for append");
+    }
+}
+
 class ServerCallbacks: public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) override {
         setRGB(0, 255, 0); 
         pServer->updateConnParams(desc->conn_handle, 6, 6, 0, 100);
         uint8_t l=100; pBatteryLevel->setValue(&l, 1); pBatteryLevel->notify();
+        
+        // Save History
+        String mac = NimBLEAddress(desc->peer_ota_addr).toString().c_str();
+        saveHistory(mac);
     }
     void onDisconnect(NimBLEServer* pServer) override {
         setRGB(255, 0, 0); pServer->getAdvertising()->start();
@@ -144,7 +159,18 @@ void startAdvertising() {
 void setup() {
     Serial.begin(115200);
     rgb.begin(); rgb.setBrightness(50); setRGB(255, 255, 0); 
-    if(!LittleFS.begin(true)) Serial.println("FS Fail");
+    
+    // 1. Initialize FileSystem FIRST
+    if(!LittleFS.begin(true)) {
+        Serial.println("LittleFS Mount Failed");
+        return;
+    }
+    
+    // 2. Ensure History File Exists
+    if(!LittleFS.exists("/history.txt")) {
+        File f = LittleFS.open("/history.txt", FILE_WRITE);
+        if(f) { f.print("--- Connection History ---\n"); f.close(); }
+    }
     
     prefs.begin("config", false);
     String dName = prefs.getString("name", "ESP32_Pro");
@@ -190,9 +216,8 @@ void setup() {
 
     setRGB(255, 0, 0); 
 
-    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-
-    // --- APIs ---
+    // --- API ROUTES (MUST BE BEFORE serveStatic) ---
+    
     server.on("/api/config", HTTP_GET, [dName, apSSID, apPass, staSSID, staPass](AsyncWebServerRequest *request){
         JsonDocument d;
         d["name"] = dName; d["type"] = prefs.getUShort("type", 0x03C1); d["mac"] = prefs.getString("mac", "");
@@ -214,18 +239,14 @@ void setup() {
         r->send(200, "text/plain", "Saved."); delay(500); ESP.restart();
     });
 
-    // --- STATUS API (Poll this) ---
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *r){
-        JsonDocument d;
-        d["busy"] = (scriptRunning || liveTypeRunning || scanRequested);
+        JsonDocument d; d["busy"] = (scriptRunning || liveTypeRunning || scanRequested);
         String s; serializeJson(d, s); r->send(200, "application/json", s);
     });
 
-    // --- DIRECT KEY API (Shortcuts) ---
     server.on("/api/live/key", HTTP_POST, [](AsyncWebServerRequest *r){
         if(!r->hasParam("cmd", true)) { r->send(400); return; }
         String cmd = r->getParam("cmd", true)->value();
-        
         if(cmd == "enter") sendKeyRaw(KEY_ENTER, 0);
         else if(cmd == "esc") sendKeyRaw(KEY_ESC, 0);
         else if(cmd == "backspace") sendKeyRaw(KEY_BACKSPACE, 0);
@@ -236,7 +257,6 @@ void setup() {
         else if(cmd == "ctrl_z") sendKeyRaw(keymap['z'][1], MOD_CTRL);
         else if(cmd == "win_r") sendKeyRaw(keymap['r'][1], MOD_GUI);
         else if(cmd == "win_d") sendKeyRaw(keymap['d'][1], MOD_GUI);
-        
         r->send(200, "text/plain", "OK");
     });
 
@@ -247,17 +267,21 @@ void setup() {
         } else r->send(400);
     });
     server.on("/api/ducky/stop", HTTP_POST, [](AsyncWebServerRequest *r){ scriptRunning=false; liveTypeRunning=false; r->send(200); });
-    
     server.on("/api/live/type", HTTP_POST, [](AsyncWebServerRequest *r){
-        if(r->hasParam("text", true)){
-            liveTypeBuffer=r->getParam("text", true)->value(); liveTypeIndex=0; liveTypeRunning=true; r->send(200);
-        } else r->send(400);
+        if(r->hasParam("text", true)){ liveTypeBuffer=r->getParam("text", true)->value(); liveTypeIndex=0; liveTypeRunning=true; r->send(200); } else r->send(400);
     });
 
+    // --- Files (index.html hidden) ---
     server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *r){
         File root = LittleFS.open("/"); File f = root.openNextFile();
         JsonDocument d; JsonArray a = d.to<JsonArray>();
-        while(f){ JsonObject o=a.add<JsonObject>(); o["name"]=String(f.name()); o["size"]=f.size(); f=root.openNextFile(); }
+        while(f){ 
+            String fname = String(f.name());
+            if(fname != "index.html" && fname != "/index.html") {
+                JsonObject o=a.add<JsonObject>(); o["name"]=fname; o["size"]=f.size();
+            }
+            f=root.openNextFile(); 
+        }
         String s; serializeJson(d, s); r->send(200, "application/json", s);
     });
     server.on("/api/files/read", HTTP_GET, [](AsyncWebServerRequest *r){
@@ -272,6 +296,7 @@ void setup() {
     server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *r){
         String p=r->getParam("path",true)->value(); if(!p.startsWith("/")) p="/"+p; LittleFS.remove(p); r->send(200);
     });
+
     server.on("/api/scan/start", HTTP_POST, [](AsyncWebServerRequest *request){
         if (scanRequested) request->send(429, "text/plain", "Busy");
         else { scanRequested = true; scanComplete = false; request->send(200, "text/plain", "OK"); }
@@ -280,10 +305,22 @@ void setup() {
         if (!scanComplete && scanRequested) request->send(202, "application/json", "[]");
         else request->send(200, "application/json", lastScanJson);
     });
+
+    // --- History Route (Fixed) ---
     server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest *request){
-        if(LittleFS.exists("/history.txt")) request->send(LittleFS, "/history.txt", "text/plain"); else request->send(200, "text/plain", "Empty");
+        // SAFETY: Only read if file exists
+        if(LittleFS.exists("/history.txt")) request->send(LittleFS, "/history.txt", "text/plain");
+        else request->send(200, "text/plain", "No History.");
     });
-    server.on("/api/clear_history", HTTP_POST, [](AsyncWebServerRequest *request){ LittleFS.remove("/history.txt"); request->send(200, "text/plain", "Cleared"); });
+    server.on("/api/clear_history", HTTP_POST, [](AsyncWebServerRequest *request){ 
+        LittleFS.remove("/history.txt"); 
+        // Recreate empty file
+        File f = LittleFS.open("/history.txt", FILE_WRITE); f.print("--- Cleared ---\n"); f.close();
+        request->send(200, "text/plain", "Cleared"); 
+    });
+
+    // --- SERVE STATIC FILES (LAST) ---
+    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
     server.begin();
 }
