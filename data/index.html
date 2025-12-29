@@ -60,7 +60,23 @@
                 <div id="staIP" style="color:var(--primary); margin-top:5px; font-size:0.8rem"></div>
                 <h2 style="margin-top:20px">Spoofer</h2>
                 <label>Name</label><input type="text" id="devName">
-                <label>Type</label><select id="devType"><option value="961">Keyboard</option><option value="962">Mouse</option><option value="964">Gamepad</option></select>
+                <label>Device Type</label>
+                    <select id="devType">
+                        <option value="961">Keyboard (Default)</option>
+                        <option value="962">Mouse</option>
+                        <option value="964">Gamepad</option>
+                        <option value="2113">Loudspeaker (0x0841)</option>
+                        <option value="64">Smartphone (0x0040)</option>
+                        <option value="128">Computer (0x0080)</option>
+                        <option value="2050">HR monitor (0x0418)</option>
+                        <option value="2114">Headphones (0x0842)</option>
+                        <option value="2115">Earbuds (0x0843)</option>
+                        <option value="2116">Car Audio (0x0844)</option>
+                        <option value="1292">Remote Control (0x050C)</option>
+                        <option value="1308">Digital Pen (0x051C)</option>
+                        <option value="1312">Handheld Scanner (0x0520)</option>
+                        <option value="2123">Video Display & Loudspeaker (0x084B)</option>
+                    </select>
                 <label>MAC</label><input type="text" id="devMac">
                 <h2 style="margin-top:20px">Timing</h2>
                 <div style="display:flex; gap:10px;"><div style="flex:1"><label>Delay</label><input type="number" id="defDelay"></div><div style="flex:1"><label>Hold Time</label><input type="number" id="keyHold"></div></div>

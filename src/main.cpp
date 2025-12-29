@@ -8,6 +8,7 @@
 #include <NimBLEHIDDevice.h>
 #include <Preferences.h>
 #include <esp_mac.h>
+#include <vector> // Required for UUID list
 
 // --- Globals ---
 #define RGB_PIN 48
@@ -40,7 +41,7 @@ bool liveTypeRunning = false;
 String liveTypeBuffer = "";
 int liveTypeIndex = 0;
 
-// --- KEYMAP & HID LOGIC (Standard US) ---
+// --- KEYMAP & HID LOGIC ---
 const uint8_t keymap[128][2] = {
     {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, 
     {0,0x2A},{0,0x2B},{0,0x28},{0,0},{0,0},{0,0},{0,0},{0,0}, 
@@ -115,44 +116,61 @@ void processDuckyLine(String line) {
     else if (cmd == "BACKSPACE" || cmd == "BKSP") sendKeyRaw(KEY_BACKSPACE, 0);
 }
 
-// --- History Saver (Safe Version) ---
-void saveHistory(String macAddress) {
-    // Note: No LittleFS.begin() here, it's done in setup()
-    File file = LittleFS.open("/history.txt", FILE_APPEND);
-    if(file) {
-        file.printf("%s | %lu s\n", macAddress.c_str(), millis()/1000);
-        file.close();
-    } else {
-        Serial.println("Failed to open history for append");
-    }
-}
-
 class ServerCallbacks: public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, ble_gap_conn_desc* desc) override {
         setRGB(0, 255, 0); 
         pServer->updateConnParams(desc->conn_handle, 6, 6, 0, 100);
         uint8_t l=100; pBatteryLevel->setValue(&l, 1); pBatteryLevel->notify();
         
-        // Save History
         String mac = NimBLEAddress(desc->peer_ota_addr).toString().c_str();
-        saveHistory(mac);
+        if(LittleFS.exists("/history.txt")) {
+            File f = LittleFS.open("/history.txt", FILE_APPEND);
+            if(f) { f.printf("%s | %lu s\n", mac.c_str(), millis()/1000); f.close(); }
+        }
     }
     void onDisconnect(NimBLEServer* pServer) override {
         setRGB(255, 0, 0); pServer->getAdvertising()->start();
     }
 };
 
+// --- FIXED ADVERTISING FUNCTION ---
 void startAdvertising() {
     NimBLEAdvertising* pAdvertising = pBleServer->getAdvertising();
     pAdvertising->stop(); 
+    
     NimBLEAdvertisementData advData;
     advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
-    advData.setAppearance(0x03C1); 
-    advData.setCompleteServices(NimBLEUUID("1812"));
+    
+    // 1. Set Appearance (Icon)
+    uint16_t type = prefs.getUShort("type", 0x03C1);
+    advData.setAppearance(type); 
+
+    // 2. Bundle Service UUIDs into a list
+    std::vector<NimBLEUUID> serviceUUIDs;
+    
+    // Always include HID Service (so typing works)
+    serviceUUIDs.push_back(NimBLEUUID("1812")); 
+    
+    // Inject Spoofed Audio UUIDs based on selected type
+    // 0x2049 (Speaker), 0x2050 (Headphones), 0x2052 (Earbuds)
+    if (type == 0x2049 || type == 0x2050 || type == 0x2052) {
+        serviceUUIDs.push_back(NimBLEUUID("110B")); // A2DP (Audio Sink)
+    }
+    // 0x0040 (Phone)
+    else if (type == 0x0040) {
+        serviceUUIDs.push_back(NimBLEUUID("111E")); // HFP (Hands-Free)
+    }
+
+    // 3. FIX: Use setCompleteServices16 for 16-bit UUID lists
+    advData.setCompleteServices16(serviceUUIDs);
+
     pAdvertising->setAdvertisementData(advData);
+    
+    // 4. Set Scan Response (Name)
     NimBLEAdvertisementData scanData;
     scanData.setName(prefs.getString("name", "ESP32_Pro").c_str());
     pAdvertising->setScanResponseData(scanData);
+    
     pAdvertising->start();
 }
 
@@ -160,17 +178,8 @@ void setup() {
     Serial.begin(115200);
     rgb.begin(); rgb.setBrightness(50); setRGB(255, 255, 0); 
     
-    // 1. Initialize FileSystem FIRST
-    if(!LittleFS.begin(true)) {
-        Serial.println("LittleFS Mount Failed");
-        return;
-    }
-    
-    // 2. Ensure History File Exists
-    if(!LittleFS.exists("/history.txt")) {
-        File f = LittleFS.open("/history.txt", FILE_WRITE);
-        if(f) { f.print("--- Connection History ---\n"); f.close(); }
-    }
+    if(!LittleFS.begin(true)) { Serial.println("FS Fail"); return; }
+    if(!LittleFS.exists("/history.txt")) { File f = LittleFS.open("/history.txt", FILE_WRITE); if(f) { f.print("--- History ---\n"); f.close(); } }
     
     prefs.begin("config", false);
     String dName = prefs.getString("name", "ESP32_Pro");
@@ -216,8 +225,7 @@ void setup() {
 
     setRGB(255, 0, 0); 
 
-    // --- API ROUTES (MUST BE BEFORE serveStatic) ---
-    
+    // --- API ROUTES ---
     server.on("/api/config", HTTP_GET, [dName, apSSID, apPass, staSSID, staPass](AsyncWebServerRequest *request){
         JsonDocument d;
         d["name"] = dName; d["type"] = prefs.getUShort("type", 0x03C1); d["mac"] = prefs.getString("mac", "");
@@ -243,7 +251,6 @@ void setup() {
         JsonDocument d; d["busy"] = (scriptRunning || liveTypeRunning || scanRequested);
         String s; serializeJson(d, s); r->send(200, "application/json", s);
     });
-
     server.on("/api/live/key", HTTP_POST, [](AsyncWebServerRequest *r){
         if(!r->hasParam("cmd", true)) { r->send(400); return; }
         String cmd = r->getParam("cmd", true)->value();
@@ -259,7 +266,6 @@ void setup() {
         else if(cmd == "win_d") sendKeyRaw(keymap['d'][1], MOD_GUI);
         r->send(200, "text/plain", "OK");
     });
-
     server.on("/api/ducky/run", HTTP_POST, [](AsyncWebServerRequest *r){
         if(r->hasParam("script", true)) {
             currentScript = r->getParam("script", true)->value();
@@ -270,16 +276,12 @@ void setup() {
     server.on("/api/live/type", HTTP_POST, [](AsyncWebServerRequest *r){
         if(r->hasParam("text", true)){ liveTypeBuffer=r->getParam("text", true)->value(); liveTypeIndex=0; liveTypeRunning=true; r->send(200); } else r->send(400);
     });
-
-    // --- Files (index.html hidden) ---
     server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *r){
         File root = LittleFS.open("/"); File f = root.openNextFile();
         JsonDocument d; JsonArray a = d.to<JsonArray>();
         while(f){ 
             String fname = String(f.name());
-            if(fname != "index.html" && fname != "/index.html") {
-                JsonObject o=a.add<JsonObject>(); o["name"]=fname; o["size"]=f.size();
-            }
+            if(fname != "index.html" && fname != "/index.html") { JsonObject o=a.add<JsonObject>(); o["name"]=fname; o["size"]=f.size(); }
             f=root.openNextFile(); 
         }
         String s; serializeJson(d, s); r->send(200, "application/json", s);
@@ -296,7 +298,6 @@ void setup() {
     server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *r){
         String p=r->getParam("path",true)->value(); if(!p.startsWith("/")) p="/"+p; LittleFS.remove(p); r->send(200);
     });
-
     server.on("/api/scan/start", HTTP_POST, [](AsyncWebServerRequest *request){
         if (scanRequested) request->send(429, "text/plain", "Busy");
         else { scanRequested = true; scanComplete = false; request->send(200, "text/plain", "OK"); }
@@ -305,21 +306,14 @@ void setup() {
         if (!scanComplete && scanRequested) request->send(202, "application/json", "[]");
         else request->send(200, "application/json", lastScanJson);
     });
-
-    // --- History Route (Fixed) ---
     server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest *request){
-        // SAFETY: Only read if file exists
-        if(LittleFS.exists("/history.txt")) request->send(LittleFS, "/history.txt", "text/plain");
-        else request->send(200, "text/plain", "No History.");
+        if(LittleFS.exists("/history.txt")) request->send(LittleFS, "/history.txt", "text/plain"); else request->send(200, "text/plain", "Empty");
     });
     server.on("/api/clear_history", HTTP_POST, [](AsyncWebServerRequest *request){ 
-        LittleFS.remove("/history.txt"); 
-        // Recreate empty file
-        File f = LittleFS.open("/history.txt", FILE_WRITE); f.print("--- Cleared ---\n"); f.close();
+        LittleFS.remove("/history.txt"); File f = LittleFS.open("/history.txt", FILE_WRITE); f.print("--- Cleared ---\n"); f.close();
         request->send(200, "text/plain", "Cleared"); 
     });
 
-    // --- SERVE STATIC FILES (LAST) ---
     server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
     server.begin();
