@@ -357,3 +357,4 @@ void loop() {
         startAdvertising(); setRGB(255, 0, 0); scanRequested = false; scanComplete = true;
     }
     delay(1);
+}
