@@ -40,7 +40,7 @@ bool liveTypeRunning = false;
 String liveTypeBuffer = "";
 int liveTypeIndex = 0;
 
-// --- KEYMAP & HID LOGIC ---
+// --- KEYMAP (Standard US) ---
 const uint8_t keymap[128][2] = {
     {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, 
     {0,0x2A},{0,0x2B},{0,0x28},{0,0},{0,0},{0,0},{0,0},{0,0}, 
@@ -65,12 +65,18 @@ const uint8_t keymap[128][2] = {
 #define MOD_ALT 0x04
 #define MOD_GUI 0x08
 
+// --- ADVANCED HID REPORT MAP (Consumer Control Focused) ---
+// This map emphasizes "Consumer Control" (Media Buttons) which is standard for Headsets.
 const uint8_t _hidReportDescriptor[] = {
+    // Report ID 1: Keyboard
     0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 
     0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 
     0x81, 0x01, 0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, 
     0x95, 0x01, 0x75, 0x03, 0x91, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 
-    0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0
+    0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0,
+    // Report ID 2: Consumer Control (Media Keys)
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x02, 0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 
+    0x00, 0x2A, 0xFF, 0x03, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0
 };
 
 void setRGB(uint8_t r, uint8_t g, uint8_t b) { rgb.setPixelColor(0, rgb.Color(r, g, b)); rgb.show(); }
@@ -138,26 +144,39 @@ void startAdvertising() {
     
     NimBLEAdvertisementData advData;
     advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+    
+    // --- LOAD APPEARANCE ---
+    // User requested 0x0842 (Headphone/Audio Sink)
     uint16_t type = prefs.getUShort("type", 0x03C1);
     advData.setAppearance(type); 
 
     std::vector<NimBLEUUID> serviceUUIDs;
-    serviceUUIDs.push_back(NimBLEUUID("1812")); // HID
-    serviceUUIDs.push_back(NimBLEUUID("180F")); // Battery
-
-    // --- FIX: Announce Audio UUIDs in Advertising ---
-    if (type == 0x2049 || type == 0x2050 || type == 0x2052) {
-        serviceUUIDs.push_back(NimBLEUUID("110B")); // A2DP Sink
+    
+    // --- THE "HEADSET" FIX ---
+    bool isAudio = false;
+    
+    // Check if user selected one of the Audio types (including your 0x0842)
+    // 0x2049=Speaker, 0x2050=Headphones, 0x2052=Earbuds, 0x0842=UserCustom
+    if (type == 0x2049 || type == 0x2050 || type == 0x2052 || type == 0x0842 || type == 2114) { 
+        isAudio = true;
+        
+        // 1. Audio Sink (Music)
+        serviceUUIDs.push_back(NimBLEUUID("110B")); 
+        // 2. AVRCP (Remote Control) - CRITICAL for "Headset" status
+        serviceUUIDs.push_back(NimBLEUUID("110E")); 
     }
-    else if (type == 0x0040) {
-        serviceUUIDs.push_back(NimBLEUUID("111E")); // HFP
+    
+    if (!isAudio) {
+        // Only advertise HID if we are NOT pretending to be audio
+        serviceUUIDs.push_back(NimBLEUUID("1812")); 
     }
 
+    // Set 16-bit UUIDs correctly
     advData.setCompleteServices16(serviceUUIDs);
     pAdvertising->setAdvertisementData(advData);
     
     NimBLEAdvertisementData scanData;
-    scanData.setName(prefs.getString("name", "ESP32_Pro").c_str());
+    scanData.setName(prefs.getString("name", "Audio Device").c_str());
     pAdvertising->setScanResponseData(scanData);
     
     pAdvertising->start();
@@ -171,7 +190,7 @@ void setup() {
     if(!LittleFS.exists("/history.txt")) { File f = LittleFS.open("/history.txt", FILE_WRITE); if(f) { f.print("--- History ---\n"); f.close(); } }
     
     prefs.begin("config", false);
-    String dName = prefs.getString("name", "ESP32_Pro");
+    String dName = prefs.getString("name", "Audio Device");
     String customMac = prefs.getString("mac", "");
     String apSSID = prefs.getString("ap_ssid", "ESP32_Pentest");
     String apPass = prefs.getString("ap_pass", "password123");
@@ -201,23 +220,36 @@ void setup() {
     pHid = new NimBLEHIDDevice(pBleServer);
     pHid->reportMap((uint8_t*)_hidReportDescriptor, sizeof(_hidReportDescriptor)); 
     pInput = pHid->inputReport(1); 
-    pHid->manufacturer()->setValue("Logitech"); pHid->pnp(0x02, 0x046D, 0xC52B, 0x0111); pHid->hidInfo(0x00, 0x01);
+    
+    // --- FAKE PnP ID (Microsoft/Realtek Audio) ---
+    // VID: 0x045E (Microsoft), PID: 0x0B05 (Xbox Headset)
+    // Using a Microsoft ID makes Windows trust it implicitly as an Audio/Accessory device.
+    pHid->manufacturer()->setValue("Microsoft"); 
+    pHid->pnp(0x02, 0x045E, 0x0B05, 0x0111);
+    pHid->hidInfo(0x00, 0x01);
 
     NimBLEService* pBat = pBleServer->createService("180F");
     pBatteryLevel = pBat->createCharacteristic("2A19", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     uint8_t l=100; pBatteryLevel->setValue(&l, 1); pBat->start();
     
-    // --- FIX: Create Dummy Audio Services ---
-    // Even though these don't DO anything, their existence in the GATT table
-    // helps convince the OS to keep the icon.
-    if (devType == 0x2049 || devType == 0x2050 || devType == 0x2052) {
-        // Create dummy A2DP Sink Service (0x110B)
-        NimBLEService* pAudio = pBleServer->createService("110B");
+    // --- CREATE DUMMY AUDIO SERVICES ---
+    // We must create BOTH A2DP and AVRCP in the GATT table.
+    // Windows checks if these exist. Even if they don't function, their presence validates the "Headset" icon.
+    if (devType == 0x2049 || devType == 0x2050 || devType == 0x2052 || devType == 0x0842 || devType == 2114) {
+        
+        // 1. A2DP Sink Service (Audio Streaming)
+        NimBLEService* pAudio = pBleServer->createService("110B"); 
+        pAudio->createCharacteristic("2902", NIMBLE_PROPERTY::READ); // Dummy Descriptor
         pAudio->start();
-    } 
-    else if (devType == 0x0040) {
-        // Create dummy Hands-Free Service (0x111E)
-        NimBLEService* pPhone = pBleServer->createService("111E");
+
+        // 2. AVRCP Controller Service (Remote Control)
+        NimBLEService* pRemote = pBleServer->createService("110E"); 
+        pRemote->createCharacteristic("2902", NIMBLE_PROPERTY::READ); // Dummy Descriptor
+        pRemote->start();
+        
+    } else if (devType == 0x0040) {
+        NimBLEService* pPhone = pBleServer->createService("111E"); 
+        pPhone->createCharacteristic("2902", NIMBLE_PROPERTY::READ);
         pPhone->start();
     }
 
@@ -229,7 +261,7 @@ void setup() {
 
     setRGB(255, 0, 0); 
 
-    // --- API ROUTES (Same as before) ---
+    // --- API ROUTES ---
     server.on("/api/config", HTTP_GET, [dName, apSSID, apPass, staSSID, staPass](AsyncWebServerRequest *r){
         JsonDocument d; d["name"] = dName; d["type"] = prefs.getUShort("type", 0x03C1); d["mac"] = prefs.getString("mac", "");
         d["ap_ssid"] = apSSID; d["ap_pass"] = apPass; d["sta_ssid"] = staSSID; d["sta_pass"] = staPass;
@@ -268,10 +300,7 @@ void setup() {
         r->send(200, "text/plain", "OK");
     });
     server.on("/api/ducky/run", HTTP_POST, [](AsyncWebServerRequest *r){
-        if(r->hasParam("script", true)) {
-            currentScript = r->getParam("script", true)->value();
-            scriptLineIndex=0; scriptRunning=true; r->send(200, "text/plain", "Running");
-        } else r->send(400);
+        if(r->hasParam("script", true)) { currentScript = r->getParam("script", true)->value(); scriptLineIndex=0; scriptRunning=true; r->send(200, "text/plain", "Running"); } else r->send(400);
     });
     server.on("/api/ducky/stop", HTTP_POST, [](AsyncWebServerRequest *r){ scriptRunning=false; liveTypeRunning=false; r->send(200); });
     server.on("/api/live/type", HTTP_POST, [](AsyncWebServerRequest *r){
@@ -280,43 +309,32 @@ void setup() {
     server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *r){
         File root = LittleFS.open("/"); File f = root.openNextFile();
         JsonDocument d; JsonArray a = d.to<JsonArray>();
-        while(f){ 
-            String fname = String(f.name());
-            if(fname != "index.html" && fname != "/index.html") { JsonObject o=a.add<JsonObject>(); o["name"]=fname; o["size"]=f.size(); }
-            f=root.openNextFile(); 
-        }
+        while(f){ String n=String(f.name()); if(n!="index.html" && n!="/index.html") { JsonObject o=a.add<JsonObject>(); o["name"]=n; o["size"]=f.size(); } f=root.openNextFile(); }
         String s; serializeJson(d, s); r->send(200, "application/json", s);
     });
     server.on("/api/files/read", HTTP_GET, [](AsyncWebServerRequest *r){
-        String p=r->getParam("path")->value(); if(!p.startsWith("/")) p="/"+p;
-        if(LittleFS.exists(p)) r->send(LittleFS, p, "text/plain"); else r->send(404);
+        String p=r->getParam("path")->value(); if(!p.startsWith("/")) p="/"+p; if(LittleFS.exists(p)) r->send(LittleFS, p, "text/plain"); else r->send(404);
     });
     server.on("/api/files/write", HTTP_POST, [](AsyncWebServerRequest *r){
-        String p=r->getParam("path",true)->value(); String c=r->getParam("content",true)->value();
-        if(!p.startsWith("/")) p="/"+p;
-        File f=LittleFS.open(p, FILE_WRITE); if(f){ f.print(c); f.close(); r->send(200); } else r->send(500);
+        String p=r->getParam("path",true)->value(); String c=r->getParam("content",true)->value(); if(!p.startsWith("/")) p="/"+p; File f=LittleFS.open(p, FILE_WRITE); if(f){ f.print(c); f.close(); r->send(200); } else r->send(500);
     });
     server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *r){
         String p=r->getParam("path",true)->value(); if(!p.startsWith("/")) p="/"+p; LittleFS.remove(p); r->send(200);
     });
     server.on("/api/scan/start", HTTP_POST, [](AsyncWebServerRequest *request){
-        if (scanRequested) request->send(429, "text/plain", "Busy");
-        else { scanRequested = true; scanComplete = false; request->send(200, "text/plain", "OK"); }
+        if (scanRequested) request->send(429, "text/plain", "Busy"); else { scanRequested = true; scanComplete = false; request->send(200, "text/plain", "OK"); }
     });
     server.on("/api/scan/results", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (!scanComplete && scanRequested) request->send(202, "application/json", "[]");
-        else request->send(200, "application/json", lastScanJson);
+        if (!scanComplete && scanRequested) request->send(202, "application/json", "[]"); else request->send(200, "application/json", lastScanJson);
     });
     server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest *request){
         if(LittleFS.exists("/history.txt")) request->send(LittleFS, "/history.txt", "text/plain"); else request->send(200, "text/plain", "Empty");
     });
     server.on("/api/clear_history", HTTP_POST, [](AsyncWebServerRequest *request){ 
-        LittleFS.remove("/history.txt"); File f = LittleFS.open("/history.txt", FILE_WRITE); f.print("--- Cleared ---\n"); f.close();
-        request->send(200, "text/plain", "Cleared"); 
+        LittleFS.remove("/history.txt"); File f = LittleFS.open("/history.txt", FILE_WRITE); f.print("--- Cleared ---\n"); f.close(); request->send(200, "text/plain", "Cleared"); 
     });
 
     server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-
     server.begin();
 }
 
@@ -326,11 +344,7 @@ void loop() {
         int nextNewLine = currentScript.indexOf('\n', scriptLineIndex);
         if (nextNewLine == -1) nextNewLine = currentScript.length();
         if (scriptLineIndex >= currentScript.length()) { scriptRunning = false; setRGB(0, 255, 0); } 
-        else {
-            processDuckyLine(currentScript.substring(scriptLineIndex, nextNewLine));
-            scriptLineIndex = nextNewLine + 1;
-            nextActionTime = millis() + defaultDelay; 
-        }
+        else { processDuckyLine(currentScript.substring(scriptLineIndex, nextNewLine)); scriptLineIndex = nextNewLine + 1; nextActionTime = millis() + defaultDelay; }
     }
     if (liveTypeRunning && millis() > nextActionTime) {
         setRGB(0, 255, 255); 
