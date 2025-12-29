@@ -8,7 +8,6 @@
 #include <NimBLEHIDDevice.h>
 #include <Preferences.h>
 #include <esp_mac.h>
-#include <vector> // Required for UUID list
 
 // --- Globals ---
 #define RGB_PIN 48
@@ -133,40 +132,30 @@ class ServerCallbacks: public NimBLEServerCallbacks {
     }
 };
 
-// --- FIXED ADVERTISING FUNCTION ---
 void startAdvertising() {
     NimBLEAdvertising* pAdvertising = pBleServer->getAdvertising();
     pAdvertising->stop(); 
     
     NimBLEAdvertisementData advData;
     advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
-    
-    // 1. Set Appearance (Icon)
     uint16_t type = prefs.getUShort("type", 0x03C1);
     advData.setAppearance(type); 
 
-    // 2. Bundle Service UUIDs into a list
     std::vector<NimBLEUUID> serviceUUIDs;
-    
-    // Always include HID Service (so typing works)
-    serviceUUIDs.push_back(NimBLEUUID("1812")); 
-    
-    // Inject Spoofed Audio UUIDs based on selected type
-    // 0x2049 (Speaker), 0x2050 (Headphones), 0x2052 (Earbuds)
+    serviceUUIDs.push_back(NimBLEUUID("1812")); // HID
+    serviceUUIDs.push_back(NimBLEUUID("180F")); // Battery
+
+    // --- FIX: Announce Audio UUIDs in Advertising ---
     if (type == 0x2049 || type == 0x2050 || type == 0x2052) {
-        serviceUUIDs.push_back(NimBLEUUID("110B")); // A2DP (Audio Sink)
+        serviceUUIDs.push_back(NimBLEUUID("110B")); // A2DP Sink
     }
-    // 0x0040 (Phone)
     else if (type == 0x0040) {
-        serviceUUIDs.push_back(NimBLEUUID("111E")); // HFP (Hands-Free)
+        serviceUUIDs.push_back(NimBLEUUID("111E")); // HFP
     }
 
-    // 3. FIX: Use setCompleteServices16 for 16-bit UUID lists
     advData.setCompleteServices16(serviceUUIDs);
-
     pAdvertising->setAdvertisementData(advData);
     
-    // 4. Set Scan Response (Name)
     NimBLEAdvertisementData scanData;
     scanData.setName(prefs.getString("name", "ESP32_Pro").c_str());
     pAdvertising->setScanResponseData(scanData);
@@ -190,6 +179,7 @@ void setup() {
     String staPass = prefs.getString("sta_pass", "");
     defaultDelay = prefs.getInt("def_delay", 15);
     keyHoldTime = prefs.getInt("key_hold", 20);
+    uint16_t devType = prefs.getUShort("type", 0x03C1);
 
     if (customMac.length() == 17) {
         uint8_t ma[6]; 
@@ -217,6 +207,20 @@ void setup() {
     pBatteryLevel = pBat->createCharacteristic("2A19", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     uint8_t l=100; pBatteryLevel->setValue(&l, 1); pBat->start();
     
+    // --- FIX: Create Dummy Audio Services ---
+    // Even though these don't DO anything, their existence in the GATT table
+    // helps convince the OS to keep the icon.
+    if (devType == 0x2049 || devType == 0x2050 || devType == 0x2052) {
+        // Create dummy A2DP Sink Service (0x110B)
+        NimBLEService* pAudio = pBleServer->createService("110B");
+        pAudio->start();
+    } 
+    else if (devType == 0x0040) {
+        // Create dummy Hands-Free Service (0x111E)
+        NimBLEService* pPhone = pBleServer->createService("111E");
+        pPhone->start();
+    }
+
     pHid->startServices();
     startAdvertising();
 
@@ -225,15 +229,13 @@ void setup() {
 
     setRGB(255, 0, 0); 
 
-    // --- API ROUTES ---
-    server.on("/api/config", HTTP_GET, [dName, apSSID, apPass, staSSID, staPass](AsyncWebServerRequest *request){
-        JsonDocument d;
-        d["name"] = dName; d["type"] = prefs.getUShort("type", 0x03C1); d["mac"] = prefs.getString("mac", "");
+    // --- API ROUTES (Same as before) ---
+    server.on("/api/config", HTTP_GET, [dName, apSSID, apPass, staSSID, staPass](AsyncWebServerRequest *r){
+        JsonDocument d; d["name"] = dName; d["type"] = prefs.getUShort("type", 0x03C1); d["mac"] = prefs.getString("mac", "");
         d["ap_ssid"] = apSSID; d["ap_pass"] = apPass; d["sta_ssid"] = staSSID; d["sta_pass"] = staPass;
         d["def_delay"] = defaultDelay; d["key_hold"] = keyHoldTime; d["ip"] = WiFi.localIP().toString();
-        String r; serializeJson(d, r); request->send(200, "application/json", r);
+        String s; serializeJson(d, s); r->send(200, "application/json", s);
     });
-
     server.on("/api/save", HTTP_POST, [](AsyncWebServerRequest *r){
         if(r->hasParam("name",true)) prefs.putString("name", r->getParam("name",true)->value());
         if(r->hasParam("type",true)) prefs.putUShort("type", r->getParam("type",true)->value().toInt());
@@ -246,7 +248,6 @@ void setup() {
         if(r->hasParam("key_hold",true)) prefs.putInt("key_hold", r->getParam("key_hold",true)->value().toInt());
         r->send(200, "text/plain", "Saved."); delay(500); ESP.restart();
     });
-
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *r){
         JsonDocument d; d["busy"] = (scriptRunning || liveTypeRunning || scanRequested);
         String s; serializeJson(d, s); r->send(200, "application/json", s);
